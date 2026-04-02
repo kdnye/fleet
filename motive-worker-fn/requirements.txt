@@ -1,0 +1,5 @@
+functions-framework==3.*
+sqlalchemy
+pg8000
+googlemaps
+cloud-sql-python-connector[pg8000]
