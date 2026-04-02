@@ -6,6 +6,7 @@ from google.cloud.sql.connector import Connector
 import pydeck as pdk
 import time
 
+
 # 1. DATABASE CONNECTION
 connector = Connector()
 def getconn():
@@ -18,6 +19,18 @@ def getconn():
     )
 
 engine = sqlalchemy.create_engine("postgresql+pg8000://", creator=getconn)
+
+
+def format_metric(value: object, unit: str, decimals: int = 0) -> str:
+    """Format telemetry values while preserving unknown signal state."""
+    numeric_value = pd.to_numeric(value, errors='coerce')
+    if pd.isna(numeric_value):
+        return f"-- {unit}" if unit else "--"
+
+    if decimals == 0:
+        return f"{int(round(float(numeric_value)))} {unit}".strip()
+
+    return f"{float(numeric_value):.{decimals}f} {unit}".strip()
 
 def get_data():
     query = """
@@ -54,12 +67,13 @@ gmaps_key = os.environ.get("GOOGLE_MAPS_API_KEY")
 
 try:
     df = get_data()
-    df['fuel_level'] = pd.to_numeric(df['fuel_level'], errors='coerce').fillna(0)
-    df['current_speed'] = pd.to_numeric(df['current_speed'], errors='coerce').fillna(0)
+    df['fuel_level_numeric'] = pd.to_numeric(df['fuel_level'], errors='coerce')
+    df['current_speed_numeric'] = pd.to_numeric(df['current_speed'], errors='coerce')
     df['lat'] = pd.to_numeric(df['last_lat'], errors='coerce').fillna(0)
     df['lon'] = pd.to_numeric(df['last_lon'], errors='coerce').fillna(0)
-    df['fuel_pct'] = df['fuel_level'].round().astype(int)
-    df['speed_mph'] = df['current_speed'].round().astype(int)
+
+    df['fuel_display'] = df['fuel_level_numeric'].apply(lambda value: format_metric(value, '%'))
+    df['speed_display'] = df['current_speed_numeric'].apply(lambda value: format_metric(value, 'mph'))
 except Exception as e:
     st.error(f"Data load failed: {e}")
     df = pd.DataFrame()
@@ -118,8 +132,8 @@ if not df.empty:
                     <div style="opacity:0.7; color:var(--text-color);">👤 {row['driver_display']}</div>
                     <div class="addr-box"><b>Location:</b><br/>{row['address_display']}</div>
                     <div style="display:flex; justify-content:space-between; font-weight:600; color:var(--text-color);">
-                        <span>💨 {row['speed_mph']} mph</span>
-                        <span>⛽ {row['fuel_pct']}%</span>
+                        <span>💨 {row['speed_display']}</span>
+                        <span>⛽ {row['fuel_display']}</span>
                     </div>
                 </div>
             """, unsafe_allow_html=True)
