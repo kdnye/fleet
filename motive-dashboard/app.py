@@ -58,11 +58,25 @@ try:
     df['current_speed'] = pd.to_numeric(df['current_speed'], errors='coerce').fillna(0)
     df['lat'] = pd.to_numeric(df['last_lat'], errors='coerce').fillna(0)
     df['lon'] = pd.to_numeric(df['last_lon'], errors='coerce').fillna(0)
-except:
+    df['fuel_pct'] = df['fuel_level'].round().astype(int)
+    df['speed_mph'] = df['current_speed'].round().astype(int)
+except Exception as e:
+    st.error(f"Data load failed: {e}")
     df = pd.DataFrame()
 
 st.title("🚛 Real-Time Fleet Monitor")
 st.caption("build: 2026-04-02-r1")
+
+with st.expander("Debug Panel", expanded=True):
+    key_present = bool(gmaps_key)
+    row_count = len(df)
+    non_zero_coordinate_count = 0
+    if not df.empty and {'lat', 'lon'}.issubset(df.columns):
+        non_zero_coordinate_count = ((df['lat'] != 0) & (df['lon'] != 0)).sum()
+
+    st.write(f"Google Maps API key present: {key_present}")
+    st.write(f"Row count: {row_count}")
+    st.write(f"Non-zero coordinate count: {int(non_zero_coordinate_count)}")
 
 if not df.empty:
     # Force coordinates to numeric for the map
@@ -104,8 +118,8 @@ if not df.empty:
                     <div style="opacity:0.7; color:var(--text-color);">👤 {row['driver_display']}</div>
                     <div class="addr-box"><b>Location:</b><br/>{row['address_display']}</div>
                     <div style="display:flex; justify-content:space-between; font-weight:600; color:var(--text-color);">
-                        <span>💨 {int(row['current_speed'])} mph</span>
-                        <span>⛽ {int(row['fuel_level'])}%</span>
+                        <span>💨 {row['speed_mph']} mph</span>
+                        <span>⛽ {row['fuel_pct']}%</span>
                     </div>
                 </div>
             """, unsafe_allow_html=True)
