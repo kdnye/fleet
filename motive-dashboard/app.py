@@ -6,10 +6,16 @@ from google.cloud.sql.connector import Connector
 import pydeck as pdk
 import time
 
+# 1. DATABASE CONNECTION
 connector = Connector()
 def getconn():
-    return connector.connect(os.environ["INSTANCE_CONNECTION_NAME"], "pg8000",
-                             user=os.environ["DB_USER"], password=os.environ["DB_PASS"], db=os.environ["DB_NAME"])
+    return connector.connect(
+        os.environ["INSTANCE_CONNECTION_NAME"],
+        "pg8000",
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASS"],
+        db=os.environ["DB_NAME"]
+    )
 
 engine = sqlalchemy.create_engine("postgresql+pg8000://", creator=getconn)
 
@@ -25,7 +31,7 @@ def get_data():
 
 st.set_page_config(page_title="Fleet Monitor", layout="wide")
 
-# UI STYLING - High Contrast
+# UI STYLING
 st.markdown("""
     <style>
     .truck-card {
@@ -38,45 +44,52 @@ st.markdown("""
         background-color: var(--background-color); 
         padding: 10px; border-radius: 8px; margin: 10px 0; 
         font-size: 0.85rem; border: 1px solid rgba(128,128,128,0.1);
+        color: var(--text-color);
     }
     </style>
 """, unsafe_allow_html=True)
+
+# THE MAP FIX: Use standard environment variable
+gmaps_key = os.environ.get("GOOGLE_MAPS_API_KEY")
 
 try:
     df = get_data()
     df['fuel_level'] = pd.to_numeric(df['fuel_level'], errors='coerce').fillna(0)
     df['current_speed'] = pd.to_numeric(df['current_speed'], errors='coerce').fillna(0)
+    df['lat'] = pd.to_numeric(df['last_lat'], errors='coerce').fillna(0)
+    df['lon'] = pd.to_numeric(df['last_lon'], errors='coerce').fillna(0)
 except:
     df = pd.DataFrame()
 
 st.title("🚛 Real-Time Fleet Monitor")
 
 if not df.empty:
-    # THE MAP FIX: Explicit Google Maps Settings
-    gmaps_key = st.secrets.get("GOOGLE_MAPS_API_KEY") or os.environ.get("GOOGLE_MAPS_API_KEY")
+    # Force coordinates to numeric for the map
+    map_df = df[df['lat'] != 0].copy()
     
-    st.pydeck_chart(pdk.Deck(
-        map_provider="google_maps",
-        map_style="roadmap",
-        api_keys={"google_maps": gmaps_key},
-        initial_view_state=pdk.ViewState(
-            latitude=df['last_lat'].mean(), 
-            longitude=df['last_lon'].mean(), 
-            zoom=4, pitch=0
-        ),
-        layers=[
-            pdk.Layer(
-                "ScatterplotLayer", df,
-                get_position=['last_lon', 'last_lat'],
-                get_color="[34, 197, 94, 200]", get_radius=30000, pickable=True
+    if gmaps_key and not map_df.empty:
+        st.pydeck_chart(pdk.Deck(
+            map_provider="google_maps",
+            map_style="roadmap",
+            api_keys={"google_maps": gmaps_key},
+            initial_view_state=pdk.ViewState(
+                latitude=map_df['lat'].mean(), 
+                longitude=map_df['lon'].mean(), 
+                zoom=4, pitch=0
             ),
-            pdk.Layer(
-                "TextLayer", df,
-                get_position=['last_lon', 'last_lat'], get_text="truck_number",
-                get_size=18, get_color=[255, 255, 255], get_pixel_offset=[0, -20]
-            )
-        ]
-    ))
+            layers=[
+                pdk.Layer(
+                    "ScatterplotLayer", map_df,
+                    get_position=['lon', 'lat'],
+                    get_color="[34, 197, 94, 200]", get_radius=30000, pickable=True
+                ),
+                pdk.Layer(
+                    "TextLayer", map_df,
+                    get_position=['lon', 'lat'], get_text="truck_number",
+                    get_size=18, get_color=[255, 255, 255], get_pixel_offset=[0, -20]
+                )
+            ]
+        ))
     
     st.divider()
 
