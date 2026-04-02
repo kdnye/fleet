@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlalchemy
 import os
+import numpy as np
 from google.cloud.sql.connector import Connector
 import pydeck as pdk
 import time
@@ -84,17 +85,24 @@ st.caption("build: 2026-04-02-r1")
 with st.expander("Debug Panel", expanded=True):
     key_present = bool(gmaps_key)
     row_count = len(df)
+    valid_coordinate_mask = pd.Series(dtype=bool)
     non_zero_coordinate_count = 0
     if not df.empty and {'lat', 'lon'}.issubset(df.columns):
-        non_zero_coordinate_count = ((df['lat'] != 0) & (df['lon'] != 0)).sum()
+        valid_coordinate_mask = (
+            (df['lat'] != 0)
+            & (df['lon'] != 0)
+            & np.isfinite(df['lat'])
+            & np.isfinite(df['lon'])
+        )
+        non_zero_coordinate_count = valid_coordinate_mask.sum()
 
     st.write(f"Google Maps API key present: {key_present}")
     st.write(f"Row count: {row_count}")
     st.write(f"Non-zero coordinate count: {int(non_zero_coordinate_count)}")
 
 if not df.empty:
-    # Force coordinates to numeric for the map
-    map_df = df[df['lat'] != 0].copy()
+    # Use the same valid-coordinate predicate for both diagnostics and map rendering
+    map_df = df[valid_coordinate_mask].copy() if not valid_coordinate_mask.empty else df.iloc[0:0].copy()
     
     if gmaps_key and not map_df.empty:
         st.pydeck_chart(pdk.Deck(
