@@ -45,7 +45,8 @@ def webhook_handler(request):
     try:
         payload_obj = json.loads(raw_body.decode('utf-8'))
     except Exception:
-        payload_obj = None
+        logging.exception("Failed to parse request body")
+        return Response('Bad request', status=400)
 
     idempotency_key = make_idempotency_key(raw_body, payload_obj or {})
     event_id = ''
@@ -54,16 +55,32 @@ def webhook_handler(request):
         event_id = str(payload_obj.get('id','') or payload_obj.get('event_id','') or '')
         action = str(payload_obj.get('action','') or payload_obj.get('type','') or '')
 
+    attributes = {
+        'event_id': event_id,
+        'action': action,
+        'idempotency_key': idempotency_key
+    }
+
     try:
-        attributes = {
-            'event_id': event_id,
-            'action': action,
-            'idempotency_key': idempotency_key
-        }
         # publish raw bytes and wait for it to finish sending
         future = publisher.publish(topic_path, raw_body, **attributes)
-        future.result() 
+        message_id = future.result()
+        logging.info(
+            "Published webhook event to Pub/Sub",
+            extra={
+                'event_id': event_id,
+                'idempotency_key': idempotency_key,
+                'message_id': message_id,
+            },
+        )
     except Exception:
-        logging.exception("Failed to publish to Pub/Sub")
+        logging.exception(
+            "Failed to publish to Pub/Sub",
+            extra={
+                'event_id': event_id,
+                'idempotency_key': idempotency_key,
+            },
+        )
+        return Response('Publish failed', status=500)
 
     return Response('OK', status=200)
