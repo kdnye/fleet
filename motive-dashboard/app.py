@@ -62,6 +62,7 @@ except:
     df = pd.DataFrame()
 
 st.title("🚛 Real-Time Fleet Monitor")
+st.caption("build: 2026-04-02-r1")
 
 if not df.empty:
     # Force coordinates to numeric for the map
