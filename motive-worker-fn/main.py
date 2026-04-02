@@ -116,6 +116,7 @@ def process_motive_webhook(cloud_event):
             INSERT INTO fleet_status_monitor (vehicle_id, truck_number, last_known_driver_name, last_lat, last_lon, last_known_address, last_updated)
             VALUES (:vid, :vnum, :dname, COALESCE(:lat, 0), COALESCE(:lon, 0), :addr, :ts)
             ON CONFLICT (vehicle_id) DO UPDATE SET
+                truck_number = COALESCE(EXCLUDED.truck_number, fleet_status_monitor.truck_number),
                 last_known_driver_name = COALESCE(:dname, fleet_status_monitor.last_known_driver_name),
                 last_lat = CASE WHEN :lat IS NOT NULL AND :lat != 0 THEN :lat ELSE fleet_status_monitor.last_lat END,
                 last_lon = CASE WHEN :lon IS NOT NULL AND :lon != 0 THEN :lon ELSE fleet_status_monitor.last_lon END,
