@@ -1,67 +1,69 @@
-import base64, json, os, sqlalchemy, functions_framework, googlemaps
-from datetime import datetime
+import os
+import hmac
+import hashlib
+import json
+import logging
+from google.cloud import pubsub_v1
+from flask import Response
 
-# Setup
-DB_USER, DB_PASS, DB_NAME = os.environ.get("DB_USER"), os.environ.get("DB_PASS"), os.environ.get("DB_NAME")
-INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
-gmaps = googlemaps.Client(key=os.environ.get("GOOGLE_MAPS_API_KEY"))
+PROJECT = os.getenv('GOOGLE_CLOUD_PROJECT') or os.getenv('GCP_PROJECT')
+TOPIC = os.getenv('PUBSUB_TOPIC', 'motive-webhooks')
+WEBHOOK_SECRET = os.getenv('MOTIVE_WEBHOOK_SECRET')
 
-pool = sqlalchemy.create_engine(
-    sqlalchemy.engine.url.URL.create(
-        drivername="postgresql+pg8000",
-        username=DB_USER, password=DB_PASS, database=DB_NAME,
-        query={"unix_sock": f"/cloudsql/{INSTANCE_CONNECTION_NAME}/.s.PGSQL.5432"},
-    )
-)
+publisher = pubsub_v1.PublisherClient()
+topic_path = publisher.topic_path(PROJECT, TOPIC)
 
-@functions_framework.cloud_event
-def process_motive_webhook(cloud_event):
-    data = base64.b64decode(cloud_event.data["message"]["data"]).decode("utf-8")
-    payload = json.loads(data)
-    if isinstance(payload, list): payload = payload[0]
+def verify_signature(raw_body: bytes, header_sig: str) -> bool:
+    if not header_sig or not WEBHOOK_SECRET:
+        return False
+    cleaned = header_sig
+    if cleaned.lower().startswith("sha1="):
+        cleaned = cleaned.split("=", 1)[1]
+    computed = hmac.new(WEBHOOK_SECRET.encode('utf-8'), raw_body, hashlib.sha1).hexdigest()
+    return hmac.compare_digest(computed, cleaned)
 
-    action = payload.get("action", "unknown")
-    v_id = str(payload.get("vehicle", {}).get("id") or payload.get("vehicle_id") or payload.get("id"))
-    
-    # 1. PARSE DRIVER (Geofence vs Location paths)
-    d_obj = payload.get("end_driver") or payload.get("start_driver") or payload.get("driver") or payload.get("user")
-    d_name = f"{d_obj.get('first_name', '')} {d_obj.get('last_name', '')}".strip() if (d_obj and isinstance(d_obj, dict)) else None
+def make_idempotency_key(payload_bytes: bytes, payload_obj: dict):
+    if isinstance(payload_obj, dict):
+        eid = payload_obj.get('id') or payload_obj.get('event_id') or payload_obj.get('eventId')
+        if eid:
+            return str(eid)
+    return hashlib.sha256(payload_bytes).hexdigest()
 
-    # 2. PARSE LOCATION & GEOCODE
-    lat = payload.get("lat")
-    lon = payload.get("lon")
-    address = None
-    if lat and lon:
-        try:
-            res = gmaps.reverse_geocode((lat, lon))
-            address = res[0]['formatted_address'] if res else None
-        except: address = None
+# This is the native Google Cloud Function handler
+def webhook_handler(request):
+    try:
+        raw_body = request.get_data()
+    except Exception:
+        logging.exception("Failed to read request body")
+        return Response('Bad request', status=400)
 
-    # 3. PARSE GEOFENCE
-    g_type = payload.get("event_type") or payload.get("geofence_action")
-    is_ent = 1 if g_type in ['enter', 'geofence_enter'] else 0
-    is_ext = 1 if g_type in ['exit', 'geofence_exit'] else 0
-    g_name = payload.get("geofence", {}).get("name") or (f"ID: {payload.get('geofence_id')}" if payload.get('geofence_id') else None)
+    signature = request.headers.get('X-KT-Webhook-Signature') or request.headers.get('x-kt-webhook-signature')
+    if not verify_signature(raw_body, signature):
+        logging.warning("Invalid signature")
+        return Response('Invalid signature', status=403)
 
-    ts = payload.get("end_time") or payload.get("located_at") or payload.get("created_at")
+    try:
+        payload_obj = json.loads(raw_body.decode('utf-8'))
+    except Exception:
+        payload_obj = None
 
-    with pool.connect() as conn:
-        # SQL with Sticky Memory
-        upsert_sql = sqlalchemy.text("""
-            INSERT INTO fleet_status_monitor (vehicle_id, truck_number, unit_type, last_known_driver_name, last_lat, last_lon, last_known_address, last_updated)
-            VALUES (:vid, :vnum, 'vehicle', :dname, COALESCE(:lat, 0), COALESCE(:lon, 0), :addr, :ts)
-            ON CONFLICT (vehicle_id) DO UPDATE SET
-                last_known_driver_name = COALESCE(:dname, fleet_status_monitor.last_known_driver_name),
-                last_lat = CASE WHEN :lat IS NOT NULL AND :lat != 0 THEN :lat ELSE fleet_status_monitor.last_lat END,
-                last_lon = CASE WHEN :lon IS NOT NULL AND :lon != 0 THEN :lon ELSE fleet_status_monitor.last_lon END,
-                last_known_address = COALESCE(:addr, fleet_status_monitor.last_known_address),
-                last_updated = :ts,
-                is_in_geofence = CASE WHEN :ent = 1 THEN TRUE WHEN :ext = 1 THEN FALSE ELSE fleet_status_monitor.is_in_geofence END,
-                current_geofence_name = CASE WHEN :ent = 1 THEN :gname WHEN :ext = 1 THEN NULL ELSE fleet_status_monitor.current_geofence_name END
-        """)
-        conn.execute(upsert_sql, {
-            "vid": v_id, "vnum": payload.get("vehicle", {}).get("number") or payload.get("vehicle_number"),
-            "dname": d_name, "lat": lat, "lon": lon, "addr": address, "ts": ts,
-            "ent": is_ent, "ext": is_ext, "gname": g_name
-        })
-        conn.commit()
+    idempotency_key = make_idempotency_key(raw_body, payload_obj or {})
+    event_id = ''
+    action = ''
+    if isinstance(payload_obj, dict):
+        event_id = str(payload_obj.get('id','') or payload_obj.get('event_id','') or '')
+        action = str(payload_obj.get('action','') or payload_obj.get('type','') or '')
+
+    try:
+        attributes = {
+            'event_id': event_id,
+            'action': action,
+            'idempotency_key': idempotency_key
+        }
+        # publish raw bytes and wait for it to finish sending
+        future = publisher.publish(topic_path, raw_body, **attributes)
+        future.result() 
+    except Exception:
+        logging.exception("Failed to publish to Pub/Sub")
+
+    return Response('OK', status=200)
