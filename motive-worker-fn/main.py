@@ -10,7 +10,6 @@ import sqlalchemy
 # Setup
 DB_USER, DB_PASS, DB_NAME = os.environ.get("DB_USER"), os.environ.get("DB_PASS"), os.environ.get("DB_NAME")
 INSTANCE_CONNECTION_NAME = os.environ.get("INSTANCE_CONNECTION_NAME")
-gmaps = googlemaps.Client(key=os.environ.get("GOOGLE_MAPS_API_KEY"))
 logger = logging.getLogger(__name__)
 
 pool = sqlalchemy.create_engine(
@@ -22,6 +21,29 @@ pool = sqlalchemy.create_engine(
         query={"unix_sock": f"/cloudsql/{INSTANCE_CONNECTION_NAME}/.s.PGSQL.5432"},
     )
 )
+
+
+
+_gmaps_client = None
+_gmaps_client_key = None
+
+
+def get_gmaps_client():
+    global _gmaps_client, _gmaps_client_key
+
+    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+    if not api_key:
+        logger.warning(
+            "Google Maps client unavailable: reason=missing_api_key env_var=GOOGLE_MAPS_API_KEY component=reverse_geocode"
+        )
+        return None
+
+    if _gmaps_client is not None and _gmaps_client_key == api_key:
+        return _gmaps_client
+
+    _gmaps_client = googlemaps.Client(key=api_key)
+    _gmaps_client_key = api_key
+    return _gmaps_client
 
 
 def _is_non_zero_number(value):
@@ -52,19 +74,28 @@ def process_motive_webhook(cloud_event):
     address = None
     geocode_found_formatted_address = False
     if has_usable_coords:
-        try:
-            res = gmaps.reverse_geocode((lat, lon))
-            address = res[0]["formatted_address"] if res else None
-            geocode_found_formatted_address = bool(address)
-        except Exception as e:
+        gmaps_client = get_gmaps_client()
+        if gmaps_client is None:
             logger.warning(
-                "Reverse geocode failed: vehicle_id=%s lat=%s lon=%s error=%s",
+                "Reverse geocode skipped: vehicle_id=%s reason=missing_gmaps_client lat=%s lon=%s",
                 v_id,
                 lat,
                 lon,
-                str(e),
             )
-            address = None
+        else:
+            try:
+                res = gmaps_client.reverse_geocode((lat, lon))
+                address = res[0]["formatted_address"] if res else None
+                geocode_found_formatted_address = bool(address)
+            except Exception as e:
+                logger.warning(
+                    "Reverse geocode failed: vehicle_id=%s lat=%s lon=%s error=%s",
+                    v_id,
+                    lat,
+                    lon,
+                    str(e),
+                )
+                address = None
 
     logger.info(
         "Geocode result status: vehicle_id=%s attempted=%s has_formatted_address=%s",
